@@ -56,6 +56,17 @@ def rename(inputfile, outputfile):
         'jet_pt', 'jet_eta', 'jet_phi', 'jet_energy', 'jet_nparticles', 'jet_sdmass', 'jet_tau1', 'jet_tau2', 'jet_tau3', 'jet_tau4',
 
         'aux_genpart_eta', 'aux_genpart_phi', 'aux_genpart_pid', 'aux_genpart_pt', 'aux_truth_match',
+
+        'genjet_matched', 'genjet_dr', 'genjet_pt', 'genjet_eta', 'genjet_phi', 'genjet_energy', 'genjet_nparticles',
+        'genjet_sdmass', 'genjet_tau1', 'genjet_tau2', 'genjet_tau3', 'genjet_tau4',
+
+        'genjet_part_px', 'genjet_part_py', 'genjet_part_pz', 'genjet_part_energy', 'genjet_part_pt',
+        'genjet_part_deta', 'genjet_part_dphi', 'genjet_part_charge', 'genjet_part_pid', 'genjet_part_histidx',
+
+        'genjet_nhist', 'genjet_hist_pt', 'genjet_hist_eta', 'genjet_hist_phi', 'genjet_hist_mass', 'genjet_hist_energy',
+        'genjet_hist_pid', 'genjet_hist_status', 'genjet_hist_charge', 'genjet_hist_index',
+        'genjet_hist_statusflags', 'genjet_hist_levelflags', 'genjet_hist_vtx', 'genjet_hist_vtxreason',
+        'genjet_hist_edge_mother', 'genjet_hist_edge_daughter',
     ]
 
     opt = ROOT.RDF.RSnapshotOptions()
