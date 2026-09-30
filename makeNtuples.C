@@ -11,6 +11,7 @@ R__LOAD_LIBRARY(libDelphes)
 #include "classes/DelphesClasses.h"
 #include "external/ExRootAnalysis/ExRootTreeReader.h"
 #include <bitset>
+#include <limits>
 #else
 class ExRootTreeReader;
 #endif
@@ -772,17 +773,26 @@ struct ParticleInfo {
 //          which inherits the production vertex of the first;
 //       2: additionally the shower collapse CMS applies to pile-up (truth::collapseGenShower: keep status 1,
 //          isHardProcess, and the last copy of anything that is not a shower object; re-attach every survivor to its
-//          nearest surviving ancestors), with one addition: partons produced in a decayed hadron (e.g.
-//          Upsilon -> g g g) are kept, since they are physics, not shower;
+//          nearest surviving ancestors), with two additions: partons produced in a decayed hadron (e.g.
+//          Upsilon -> g g g) are kept, since they are physics, not shower, and so is the last copy of a top;
 //   - the GEN vertex reasons of truth::genVertexReason, with the truth::VertexReason numbering, stamped on the
 //     complete GEN topology before any collapse (as CMS does), and Unknown for the beam-side vertices (CMS models
 //     those as artificial vertices);
 //   - the truth levels of PhysicsTools/TruthInfo/interface/TruthLevels.h that exist without SIM, with the
 //     truth::LevelFlag bit values.
 //
-// Mother links: D1..D2 is a contiguous daughter range in both the HepMC and Pythia8 Delphes readers, while M1..M2 is
-// not always a range (HepMC2: first/last incoming particle of the production vertex), so mothers are built by
+// Mother links: D1..D2 is a contiguous daughter range in the HepMC2, HepMC3 and Pythia8 Delphes readers, while M1..M2
+// is not always a range (HepMC: first/last incoming particle of the production vertex), so mothers are built by
 // inverting the daughter ranges, plus the M1/M2 endpoints themselves.
+//
+// Beyond Pythia (the CMS rules assume Pythia status codes):
+//   - a record that is not a DAG is made one: Sherpa lists the incoming hard-process partons among the outputs of its
+//     single shower vertex, whose inputs include the final-state partons. Inside each strongly connected component, the
+//     mother links that do not lead deeper from the beams (BFS depth) are dropped;
+//   - Herwig clusters (81) are treated like Pythia strings/clusters, and ThePEG remnants (82) like beam pseudoparticles;
+//   - a parton splitting into status-11 partons (the Herwig and Sherpa shower code) is ShowerBranching, and partons
+//     turning into a cluster or string are Hadronization. isHardProcess, and with it the HardProcess and PartonJets
+//     levels and the HardScatter reason, needs Pythia codes or the status 3 Sherpa gives its hard-process legs.
 class GenTruthGraph {
 public:
   enum StatusBit {
@@ -860,6 +870,9 @@ public:
   int vertexReason(int v) const { return v < 0 ? Unknown : vertexReason_[v]; }
   // parents in the stored (collapsed or full) graph
   const std::vector<int> &parents(int i) const { return parents_[i]; }
+  // generator records that were not DAGs so far, and the mother links dropped to make them one
+  long eventsWithCycles() const { return eventsWithCycles_; }
+  long droppedCycleLinks() const { return droppedCycleLinks_; }
 
   // all stored ancestors of the seeds, including the seeds themselves, sorted by Particle-branch index
   std::vector<int> ancestry(const std::vector<int> &seeds) const {
@@ -913,12 +926,19 @@ public:
     return (a >= 1 && a <= 6) || a == 21;
   }
 
-  // TruthInfo isShowerObject: partons, diquarks, strings/clusters and generator pseudoparticles
+  // Pythia strings/clusters (91-94) and Herwig clusters (81)
+  static bool isStringOrCluster(int pdgId) {
+    int a = std::abs(pdgId);
+    return a == 81 || (a >= 91 && a <= 94);
+  }
+
+  // TruthInfo isShowerObject: partons, diquarks, strings/clusters and generator pseudoparticles (plus the Herwig
+  // cluster 81 and the ThePEG remnant 82)
   static bool isShowerObject(int pdgId) {
     int a = std::abs(pdgId);
     if (isParton(a))
       return true;
-    if (a >= 91 && a <= 94)
+    if (isStringOrCluster(a) || a == 82)
       return true;
     if (a == 990)
       return true;
@@ -976,11 +996,96 @@ private:
         addMother(gp->D2, i);
       }
     }
+    breakCycles();
     daughters_.assign(n_, {});
     for (int i = 0; i < n_; ++i) {
       for (int m : mothers_[i])
         daughters_[m].push_back(i);
     }
+  }
+
+  // Drop the mother links that close a cycle: inside a strongly connected component (Tarjan), a link from a mother that
+  // is not strictly shallower than its daughter, in BFS depth from the particles without mothers. Every remaining link
+  // inside a component goes strictly deeper and links between components follow their DAG, so the result is acyclic.
+  // A DAG is left untouched.
+  void breakCycles() {
+    std::vector<std::vector<int>> dau(n_);
+    for (int i = 0; i < n_; ++i) {
+      for (int m : mothers_[i])
+        dau[m].push_back(i);
+    }
+
+    std::vector<int> comp(n_, -1), low(n_, 0), order(n_, -1), stack;
+    std::vector<char> onStack(n_, 0);
+    std::vector<std::pair<int, size_t>> calls;
+    int counter = 0, ncomp = 0;
+    bool anyCycle = false;
+    for (int s = 0; s < n_; ++s) {
+      if (order[s] >= 0)
+        continue;
+      order[s] = low[s] = counter++;
+      stack.push_back(s);
+      onStack[s] = 1;
+      calls.emplace_back(s, 0);
+      while (!calls.empty()) {
+        const int v = calls.back().first;
+        if (calls.back().second < dau[v].size()) {
+          const int w = dau[v][calls.back().second++];
+          if (order[w] < 0) {
+            order[w] = low[w] = counter++;
+            stack.push_back(w);
+            onStack[w] = 1;
+            calls.emplace_back(w, 0);
+          } else if (onStack[w]) {
+            low[v] = std::min(low[v], order[w]);
+          }
+          continue;
+        }
+        if (low[v] == order[v]) {
+          int w = -1, size = 0;
+          do {
+            w = stack.back();
+            stack.pop_back();
+            onStack[w] = 0;
+            comp[w] = ncomp;
+            ++size;
+          } while (w != v);
+          anyCycle |= size > 1;
+          ++ncomp;
+        }
+        calls.pop_back();
+        if (!calls.empty())
+          low[calls.back().first] = std::min(low[calls.back().first], low[v]);
+      }
+    }
+    if (!anyCycle)
+      return;
+
+    std::vector<int> depth(n_, std::numeric_limits<int>::max()), queue;
+    for (int i = 0; i < n_; ++i) {
+      if (mothers_[i].empty()) {
+        depth[i] = 0;
+        queue.push_back(i);
+      }
+    }
+    for (size_t q = 0; q < queue.size(); ++q) {
+      for (int d : dau[queue[q]]) {
+        if (depth[d] == std::numeric_limits<int>::max()) {
+          depth[d] = depth[queue[q]] + 1;
+          queue.push_back(d);
+        }
+      }
+    }
+    for (int i = 0; i < n_; ++i) {
+      auto &v = mothers_[i];
+      const size_t before = v.size();
+      v.erase(std::remove_if(v.begin(),
+                             v.end(),
+                             [&](int m) { return comp[m] == comp[i] && depth[m] >= depth[i]; }),
+              v.end());
+      droppedCycleLinks_ += before - v.size();
+    }
+    ++eventsWithCycles_;
   }
 
   // ---- MCTruthHelper port (indices instead of pointers, -1 for none) ----
@@ -1169,7 +1274,9 @@ private:
       return true;
     if (statusFlags_[p] & (1u << kIsHardProcess))
       return true;
-    if ((statusFlags_[p] & (1u << kIsLastCopy)) && !isShowerObject(pid_[p]))
+    // the top decays before it can hadronize, so its last copy is kept like any other resonance (CMS keeps it only
+    // through isHardProcess, which generators without Pythia status codes, e.g. Herwig, never set)
+    if ((statusFlags_[p] & (1u << kIsLastCopy)) && (!isShowerObject(pid_[p]) || std::abs(pid_[p]) == 6))
       return true;
     // addition to the CMS rule: partons from a hadron decay, e.g. Upsilon -> g g g (the beam protons are not decays)
     if (isParton(pid_[p])) {
@@ -1362,12 +1469,16 @@ private:
         vertexReason_[v] = ShowerBranching;
         continue;
       }
-      const bool fromString = std::any_of(in.begin(), in.end(), [&](int i) {
-        int a = std::abs(pid_[i]);
-        return a >= 91 && a <= 94;
-      });
+      // the same without Pythia shower codes: Herwig and Sherpa give shower partons status 11
+      if (fromShower &&
+          std::all_of(out.begin(), out.end(), [&](int i) { return isParton(pid_[i]) && status_[i] == 11; })) {
+        vertexReason_[v] = ShowerBranching;
+        continue;
+      }
+      const bool fromString = std::any_of(in.begin(), in.end(), [&](int i) { return isStringOrCluster(pid_[i]); });
       const bool toHadron = std::any_of(out.begin(), out.end(), [&](int i) { return !isShowerObject(pid_[i]); });
-      if (fromString || (fromShower && (toHadron || anyOutgoingStatus(71, 79)))) {
+      const bool toString = std::any_of(out.begin(), out.end(), [&](int i) { return isStringOrCluster(pid_[i]); });
+      if (fromString || (fromShower && (toHadron || toString || anyOutgoingStatus(71, 79)))) {
         vertexReason_[v] = Hadronization;
         continue;
       }
@@ -1506,6 +1617,8 @@ private:
   std::vector<int> vertexOf_;
   std::vector<int> vertexReason_;
   std::vector<uint32_t> levelFlags_;
+  long eventsWithCycles_ = 0;
+  long droppedCycleLinks_ = 0;
 };
 
 //------------------------------------------------------------------------------
@@ -1860,6 +1973,12 @@ void makeNtuples(TString inputFile,
 
   tree->Write();
   std::cerr << TString::Format("** Written %d jets to output %s", num_processed, outputFile.Data()) << std::endl;
+  if (genGraph.eventsWithCycles() > 0) {
+    std::cerr << TString::Format("** Generator record not a DAG in %ld events: dropped %ld cyclic mother links",
+                                 genGraph.eventsWithCycles(),
+                                 genGraph.droppedCycleLinks())
+              << std::endl;
+  }
 
   delete treeReader;
   delete chain;
