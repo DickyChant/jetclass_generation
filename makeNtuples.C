@@ -698,26 +698,37 @@ private:
   EventType event_type_ = EventType::QCD;
 };
 
+// charged pion mass (PDG), the mass CMS particle flow assigns to charged hadrons
+constexpr double kChargedPionMass = 0.13957039;
+
 struct ParticleInfo {
+  // Uses the stored four-momentum, not GenParticle::Mass: Delphes' HepMC2 reader rescales the momentum of a file
+  // written in MeV to GeV but copies the mass field unscaled.
   ParticleInfo(const GenParticle *particle) {
     pt = particle->PT;
     eta = particle->Eta;
     phi = particle->Phi;
-    mass = particle->Mass;
-    p4 = ROOT::Math::PtEtaPhiMVector(pt, eta, phi, mass);
-    px = p4.px();
-    py = p4.py();
-    pz = p4.pz();
-    energy = p4.energy();
+    px = particle->Px;
+    py = particle->Py;
+    pz = particle->Pz;
+    energy = particle->E;
+    mass = particle->P4().M();
     charge = particle->Charge;
     pid = particle->PID;
   }
 
-  ParticleInfo(const ParticleFlowCandidate *particle) {
+  // With chargedHadronPionMass, a charged candidate that is not an electron or a muon gets the pion mass at fixed
+  // track momentum, as in CMS particle flow; Delphes gives it its true mass, which identifies kaons and protons.
+  // Neutral hadrons and photons are massless (energy = |p|) in both Delphes and CMS particle flow.
+  ParticleInfo(const ParticleFlowCandidate *particle, bool chargedHadronPionMass) {
     pt = particle->PT;
     eta = particle->Eta;
     phi = particle->Phi;
     mass = particle->Mass;
+    if (chargedHadronPionMass && particle->Charge != 0 && std::abs(particle->PID) != 11 &&
+        std::abs(particle->PID) != 13) {
+      mass = kChargedPionMass;
+    }
     p4 = ROOT::Math::PtEtaPhiMVector(pt, eta, phi, mass);
     px = p4.px();
     py = p4.py();
@@ -1502,7 +1513,8 @@ private:
 void makeNtuples(TString inputFile,
                  TString outputFile,
                  TString jetBranch = "FatJet",
-                 int genHistoryMode = GenTruthGraph::kCollapseCopies) {
+                 int genHistoryMode = GenTruthGraph::kCollapseCopies,
+                 bool chargedHadronPionMass = true) {
   gSystem->Load("libDelphes");
 
   TFile *fout = new TFile(outputFile, "RECREATE");
@@ -1704,7 +1716,7 @@ void makeNtuples(TString inputFile,
         if (object->IsA() == GenParticle::Class()) {
           particles.emplace_back((GenParticle *)object);
         } else if (object->IsA() == ParticleFlowCandidate::Class()) {
-          particles.emplace_back((ParticleFlowCandidate *)object);
+          particles.emplace_back((ParticleFlowCandidate *)object, chargedHadronPionMass);
         }
         const auto &p = particles.back();
         if (std::abs(p.pz) > 10000 || std::abs(p.eta) > 5 || p.pt <= 0) {
@@ -1810,7 +1822,7 @@ void makeNtuples(TString inputFile,
           arrayVars["genjet_hist_pt"].push_back(gp->PT);
           arrayVars["genjet_hist_eta"].push_back(gp->Eta);
           arrayVars["genjet_hist_phi"].push_back(gp->Phi);
-          arrayVars["genjet_hist_mass"].push_back(gp->Mass);
+          arrayVars["genjet_hist_mass"].push_back(gp->P4().M());  // not gp->Mass, see ParticleInfo
           arrayVars["genjet_hist_energy"].push_back(gp->E);
           intArrayVars["genjet_hist_pid"].push_back(gp->PID);
           intArrayVars["genjet_hist_status"].push_back(gp->Status);
